@@ -87,7 +87,7 @@ void gemm_f32_row_row_row_row_cuda(
     for (int i = 0; i < deviceCount; ++i) {
         cudaSetDevice(i);
         cudaDeviceProp deviceProp;
-        cudaGetDeviceProperties_v2(&deviceProp, i);
+        cudaGetDeviceProperties(&deviceProp, i);
         std::cout<<deviceProp.name<<std::endl;
     }
     cudaSetDevice(0);

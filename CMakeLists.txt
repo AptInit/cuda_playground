@@ -10,3 +10,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_subdirectory(cute_gemm)
 add_executable(cuda_playground main.cpp)
 target_link_libraries(cuda_playground PRIVATE cute_gemm)
+#include(GNUInstallDirs)
+#install(TARGETS cuda_playground
+#        RUNTIME DESTINATION bin  # Will be <prefix>/bin
+#        LIBRARY DESTINATION lib  # Will be <prefix>/lib
+#)
