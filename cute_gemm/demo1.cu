@@ -21,13 +21,12 @@ __device__ static void kernel_block(
     }
 }
 
-template <dim3 grid, dim3 block>
+template <dim3 block>
 __global__ static void kernel_single_block(
     const size_t m, const size_t n, const size_t k,
     const float* A, const float* B, const float* C,
     float* dst) {
-    static_assert(grid.x == 1 && grid.y == 1 && grid.z == 1, "single block for now");
-    static_assert(block.z == 1 && grid.z == 1, "2D tiling");
+    static_assert(block.z == 1, "2D tiling");
     // All matrices are row-major, fully adopt CuTe's convention now
     auto get_layout = [] __device__ (const auto d0, const auto d1) {
         const auto shape = cute::make_shape(d0, d1);
@@ -73,6 +72,66 @@ __global__ static void kernel_single_block(
     }
 }
 
+template <dim3 grid, dim3 block>
+__global__ static void kernel_grid(
+    const size_t m, const size_t n, const size_t k,
+    const float* A, const float* B, const float* C,
+    float* dst) {
+    using namespace cute;
+    static_assert(block.z == 1 && grid.z == 1, "2D tiling");
+    // All matrices are row-major, fully adopt CuTe's convention now
+    auto get_layout = [] __device__ (const auto d0, const auto d1) {
+        const auto shape = cute::make_shape(d0, d1);
+        return make_layout(shape);
+    };
+    auto get_basis = [] __device__ (const auto layout, const auto tiler) {
+        // Do stuff recursively in the future
+        static_assert(cute::rank(layout) == 2);
+        return std::make_tuple(
+            zipped_divide(
+                make_layout(layout.shape(), make_stride(_1{}, _0{})), tiler),
+            zipped_divide(
+                make_layout(layout.shape(), make_stride(_0{}, _1{})), tiler));
+    };
+    const auto layoutA = get_layout(k, m);
+    const auto layoutB = get_layout(n, k);
+    const auto layoutC = get_layout(n, m);
+    const auto layoutDst = layoutC;
+    // Create tilers for matrices, bottom-up for now, so block-level first
+    constexpr auto blockTiler = Shape<cute::C<block.x>, cute::C<block.y>>{}; // tileN, tileM
+    const auto blkTilerA = make_shape(k, cute::shape<1>(blockTiler));
+    const auto blkTilerB = make_shape(cute::shape<0>(blockTiler), k);
+    // Tile the problem
+    const auto blkTiledA = zipped_divide(layoutA, blkTilerA);
+    const auto blkTiledB = zipped_divide(layoutB, blkTilerB);
+    const auto blkTiledDst = zipped_divide(layoutDst, blockTiler);
+    // Get bounds checker layout for each basis
+    auto [boundsBlkDstN, boundsBlkDstM] = get_basis(layoutDst, blockTiler);
+    auto predicate = [=] __device__ (auto local_idx, auto tile_idx){
+        return boundsBlkDstN(local_idx, tile_idx) < cute::size<0>(layoutDst)
+            && boundsBlkDstM(local_idx, tile_idx) < cute::size<1>(layoutDst);};
+    // Grid-level tilers
+    const auto gridDomain = make_layout(cute::shape<1>(blkTiledDst));
+    constexpr auto gridTiler = Shape<cute::C<grid.x>, cute::C<grid.y>>{}; // blockN, blockM
+    const auto grdTiledDst = zipped_divide(gridDomain, gridTiler);
+    // Loop through the GEMM problem
+    const auto blockCoord = make_coord(blockIdx.x, blockIdx.y);
+    for (size_t gridIdx = 0; gridIdx < cute::size<1>(grdTiledDst); ++gridIdx) {
+        const auto tileIdx = grdTiledDst(blockCoord, gridIdx);
+        if (tileIdx >= cute::size(gridDomain)) { continue; }
+        auto tileCoord = idx2crd(tileIdx, cute::get<1>(blkTiledDst).shape());
+        auto tileCoordA = make_coord(_0{}, cute::get<1>(tileCoord));
+        auto tileCoordB = make_coord(cute::get<0>(tileCoord), _0{});
+        // Convert 2D tile coordinates to linear indices using crd2idx
+        auto tileIdxA = crd2idx(tileCoordA, cute::get<1>(blkTiledA).shape());
+        auto tileIdxB = crd2idx(tileCoordB, cute::get<1>(blkTiledB).shape());
+        kernel_block<blockTiler>(
+            tileIdxA, tileIdxB, tileIdx,
+            blkTiledA, blkTiledB, blkTiledDst, predicate,
+            A, B, C, dst);
+    }
+}
+
 void gemm_f32_row_row_row_row_cuda(
     const size_t m, const size_t n, const size_t k,
     const float* A, const float* B, const float* C,
@@ -96,9 +155,9 @@ void gemm_f32_row_row_row_row_cuda(
     const auto matC = CuPtr(m*n, C);
     auto matD = CuPtr<float>(m*n);
     // Kernel
-    constexpr dim3 grid = {1,1,1};
+    constexpr dim3 grid = {6,8,1};
     constexpr dim3 block = {32,24,1};
-    kernel_single_block<grid, block><<<grid, block>>>(m,n,k,matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
-
+    kernel_single_block<block><<<{1,1,1}, block>>>(m,n,k,matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
+    kernel_grid<grid, block><<<grid, block>>>(m,n,k,matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
     cudaMemcpy(dst, matD.ptr(), sizeof(float)*m*n, cudaMemcpyDeviceToHost);
 }

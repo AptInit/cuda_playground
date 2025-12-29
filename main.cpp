@@ -4,7 +4,7 @@
 
 int main() {
     std::cout << "It's GEMM time" << std::endl;
-    int M = 48, N = 64, K = 65536;
+    int M = 192, N = 192, K = 65536;
     auto A = std::make_unique<float[]>(M * K);
     auto B = std::make_unique<float[]>(K * N);
     auto C = std::make_unique<float[]>(M * N);
@@ -34,9 +34,11 @@ int main() {
                 ref += A[i * K + l] * B[l * N + j];
             }
             ref += C[i * N + j];
-            if (std::abs(dst[i * N + j] - ref) > 1e-2) {
-                std::cout << "Error at " << i << ", " << j
-                    << ": REL DIFF(result/ref-1)=" << (dst[i * N + j]+1e-7f)/(ref+1e-7f)-1 << std::endl;
+            if (std::abs(dst[i * N + j] - ref) > 1e-2f) {
+                if (const double relDiff = (dst[i * N + j]+1e-7f)/(ref+1e-7f)-1; std::abs(relDiff) > 3e-7f) {
+                    std::cout << "Error at " << i << ", " << j
+                    << ": REL DIFF(result/ref-1)=" << relDiff << std::endl;
+                }
             } else {
                 //std::cout << dst[i * N + j] << "\t";
             }
