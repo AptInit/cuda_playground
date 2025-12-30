@@ -6,12 +6,25 @@
 
 #include <cuda_runtime.h>
 #include <iostream>
+#include <numeric>
 #include <optional>
 #include <source_location>
 #include <thread>
 
 namespace util
 {
+    template <std::integral T>
+    __host__ __device__ constexpr T floor(const T num, const T factor) {
+        return num/factor*factor;
+    }
+    template <std::integral T>
+    __host__ __device__ constexpr T ceiling(const T num, const T factor) {
+        return floor(num+factor-1, factor);
+    }
+    template <std::integral T>
+    __host__ __device__ constexpr std::tuple<T, T> lcm_gcd(const T a, const T b) {
+        return {std::lcm(a, b), std::gcd(a, b)};
+    }
     inline void log(const std::optional<std::string_view> &prompt = std::nullopt,
         const std::source_location& location = std::source_location::current()){
         std::cout << ""

@@ -27,6 +27,7 @@ int main() {
 
     //gemm_f32_row_row_row_row(M, N, K, A.get(), B.get(), C.get(), dst.get());
     gemm_f32_row_row_row_row_cuda(M, N, K, A.get(), B.get(), C.get(), dst.get());
+    gemm_f32_rrrr_cuda_v2(M, N, K, A.get(), B.get(), C.get(), dst.get());
     for (int i = 0; i < M; ++i) {
         for (int j = 0; j < N; ++j) {
             float ref = 0;
