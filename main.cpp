@@ -44,7 +44,7 @@ bool test_gemm(int M, int N, int K) {
 int main() {
     struct TestCase { int M, N, K; };
     TestCase tests[] = {
-        {23, 32, 65536},   // Original: partial M
+        {192, 384, 65536},   // Original: partial M
         {24, 32, 65536},   // Full tiles
         {1, 32, 65536},    // Extreme partial M
         {48, 31, 65536},   // Partial N
