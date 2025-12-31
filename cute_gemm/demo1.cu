@@ -72,12 +72,13 @@ __global__ static void kernel_single_block(
     }
 }
 
-template <dim3 grid, dim3 block>
+template <unsigned grid_x, unsigned grid_y, unsigned grid_z, unsigned block_x, unsigned block_y, unsigned block_z>
 __global__ static void kernel_grid(
     const size_t m, const size_t n, const size_t k,
     const float* A, const float* B, const float* C,
     float* dst) {
     using namespace cute;
+    constexpr dim3 grid{grid_x, grid_y, grid_z}, block{block_x, block_y, block_z};
     static_assert(block.z == 1 && grid.z == 1, "2D tiling");
     // All matrices are row-major, fully adopt CuTe's convention now
     auto get_layout = [] __device__ (const auto d0, const auto d1) {
@@ -132,6 +133,14 @@ __global__ static void kernel_grid(
     }
 }
 
+// cudafe++ struggles with CNTTP
+template <dim3 grid, dim3 block>
+static void kernel_grid_caller(const size_t m, const size_t n, const size_t k,
+    const float* A, const float* B, const float* C,
+    float* dst) {
+    kernel_grid<grid.x, grid.y, grid.z, block.x, block.y, block.z><<<grid, block>>>(m,n,k,A,B,C,dst);
+}
+
 void gemm_f32_row_row_row_row_cuda(
     const size_t m, const size_t n, const size_t k,
     const float* A, const float* B, const float* C,
@@ -158,6 +167,6 @@ void gemm_f32_row_row_row_row_cuda(
     constexpr dim3 grid = {6,8,1};
     constexpr dim3 block = {32,24,1};
     //kernel_single_block<block><<<{1,1,1}, block>>>(m,n,k,matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
-    kernel_grid<grid, block><<<grid, block>>>(m,n,k,matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
+    kernel_grid_caller<grid, block>(m,n,k,matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
     cudaMemcpy(dst, matD.ptr(), sizeof(float)*m*n, cudaMemcpyDeviceToHost);
 }
