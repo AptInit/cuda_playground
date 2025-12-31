@@ -64,7 +64,7 @@ __global__ static void kernel_grid_v2(
     using namespace cute;
     constexpr dim3 grid{grid_x, grid_y, grid_z}, block{block_x, block_y, block_z};
     static_assert(block.z == 1 && grid.z == 1, "2D tiling");
-    // All matrices are row-major, fully adopt CuTe's convention now
+    // All matrices are row-major, but CuTe uses colexicographical order, follow CuTe's convention
     auto get_layout = [] __device__ (const auto d0, const auto d1) {
         const auto shape = cute::make_shape(d0, d1);
         return make_layout(shape);
