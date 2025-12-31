@@ -42,11 +42,13 @@ __device__ static void kernel_block(
             acc += scratchA_SMEM[threadIdx.y*tileK/32+k/32][k%32] * scratchB_SMEM[k*(tileN/32)+threadIdx.x/32][threadIdx.x%32];
         }
     }
-    for (size_t k=cntK*tileK; k<dimK; ++k) {
-        acc += A[tiledA(cute::make_coord(k, cute::get<1>(localCoord)), tileA_idx)]
-             * B[tiledB(cute::make_coord(cute::get<0>(localCoord), k), tileB_idx)];
+    if (isValid) {
+        for (size_t k=cntK*tileK; k<dimK; ++k) {
+            acc += A[tiledA(cute::make_coord(k, cute::get<1>(localCoord)), tileA_idx)]
+                 * B[tiledB(cute::make_coord(cute::get<0>(localCoord), k), tileB_idx)];
+        }
+        dst[idxDst] = acc;
     }
-    if (isValid) dst[idxDst] = acc;
 }
 
 template <unsigned grid_x, unsigned grid_y, unsigned grid_z, unsigned block_x, unsigned block_y, unsigned block_z>
