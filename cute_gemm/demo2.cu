@@ -20,7 +20,8 @@ __device__ static void kernel_block(
     __shared__ float scratchB_SMEM[tileK*tileN/32][32];
     const auto localCoord = cute::make_coord(threadIdx.x, threadIdx.y);
     const auto idxDst = tiledDst(localCoord, tile_idx);
-    const bool isValid = predicate(cute::crd2idx(localCoord, kernelTile), tile_idx);
+    const auto [isValidN, isValidM] = predicate(cute::crd2idx(localCoord, kernelTile), tile_idx);
+    const bool isValid = isValidN && isValidM;
     float acc = isValid ? C[idxDst] : 0.0f;
     const size_t dimK = cute::size<0>(cute::shape<0>(tiledA));
     // Don't want to spam layout algebra here
@@ -31,11 +32,11 @@ __device__ static void kernel_block(
         __syncthreads();
         for (size_t i=0; i<tileK*tileM; i+=tileM*tileN) {
             scratchA_SMEM[threadIdx.y*tileK/32+i/tileM/32][threadIdx.x] =
-                isValid ? A[tiledA(cute::make_coord(kOffset+i/tileM+threadIdx.x, cute::get<1>(localCoord)), tileA_idx)] : 0.0f;
+                isValidM ? A[tiledA(cute::make_coord(kOffset+i/tileM+threadIdx.x, cute::get<1>(localCoord)), tileA_idx)] : 0.0f;
         }
         for (size_t i=0; i<tileK*tileN; i+=tileM*tileN) {
             scratchB_SMEM[threadIdx.y+i/tileN][threadIdx.x] =
-                isValid ? B[tiledB(cute::make_coord(cute::get<0>(localCoord), kOffset+i/tileN+threadIdx.y), tileB_idx)] : 0.0f;
+                isValidN ? B[tiledB(cute::make_coord(cute::get<0>(localCoord), kOffset+i/tileN+threadIdx.y), tileB_idx)] : 0.0f;
         }
         __syncthreads();
         for (size_t k=0; k<tileK; ++k) {
@@ -88,8 +89,8 @@ __global__ static void kernel_grid_v2(
     // Get bounds checker layout for each basis
     auto [boundsBlkDstN, boundsBlkDstM] = get_basis(layoutDst, blockTiler);
     auto predicate = [=] __device__ (auto local_idx, auto tile_idx){
-        return boundsBlkDstN(local_idx, tile_idx) < cute::size<0>(layoutDst)
-            && boundsBlkDstM(local_idx, tile_idx) < cute::size<1>(layoutDst);
+        return std::make_tuple(boundsBlkDstN(local_idx, tile_idx) < cute::size<0>(layoutDst),
+                               boundsBlkDstM(local_idx, tile_idx) < cute::size<1>(layoutDst));
     };
     // Grid-level tilers
     const auto gridDomain = make_layout(cute::shape<1>(blkTiledDst));

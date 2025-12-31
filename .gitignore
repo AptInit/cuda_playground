@@ -2,3 +2,5 @@ build/
 .cache/
 .idea/
 cmake-build-*/
+cute_gemm/include/cute
+cute_gemm/include/cutlass
