@@ -1,0 +1,6 @@
+---
+BasedOnStyle: Google
+AlignAfterOpenBracket: DontAlign
+IndentPPDirectives: BeforeHash
+IndentWidth: 2
+MaxEmptyLinesToKeep: 2
