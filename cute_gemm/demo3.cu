@@ -162,7 +162,7 @@ __device__ __forceinline__ static void kernel_block(const TA a_tiled,
 
 template <unsigned grid_x, unsigned grid_y, unsigned grid_z, unsigned block_x,
     unsigned block_y, unsigned block_z>
-__global__ static void kernel_grid_v3(const unsigned m, const unsigned n,
+__global__ static void __launch_bounds__(block_x*block_y) kernel_grid_v3(const unsigned m, const unsigned n,
     const unsigned k, const float* A, const float* B, const float* C,
     float* dst) {
   // Integer intensity is ridiculous
@@ -181,7 +181,7 @@ __global__ static void kernel_grid_v3(const unsigned m, const unsigned n,
   // Build tilers
   const auto gridTiler = make_tile(Grid.x, k, Grid.y);
   const auto blockTiler =
-      make_tile(Block.x * Cfg::ThN(), k, Block.y * Cfg::ThM());
+      make_tile(Block.x * typename Cfg::ThN{}, k, Block.y * typename Cfg::ThM{});
 
 
   // Define problem space
@@ -219,8 +219,8 @@ __global__ static void kernel_grid_v3(const unsigned m, const unsigned n,
       const auto dstTiled =
           local_tile(dstTen, blockTiler, tileCoord, Step<_1, X, _1>{});
       const auto probITiled = local_tile(worldI, blockTiler, tileCoord);
-      if (elem_less(probITiled(Block.x * Cfg::ThN() - _1{}, _0{},
-                        Block.y * Cfg::ThM() - _1{}),
+      if (elem_less(probITiled(Block.x * typename Cfg::ThN{} - _1{}, _0{},
+                        Block.y * typename Cfg::ThM{} - _1{}),
               world)) {
         kernel_block<Cfg{true}>(
             aTiled, bTiled, cTiled, dstTiled, probITiled, shape(world));
