@@ -10,9 +10,64 @@
 #include <numeric>
 #include <optional>
 #include <source_location>
-#include <thread>
 
 namespace util {
+template <dim3 vec>
+struct SDim3 {
+  using X = cute::Int<vec.x>;
+  using Y = cute::Int<vec.y>;
+  using Z = cute::Int<vec.z>;
+  X x;
+  Y y;
+  Z z;
+};
+// 1. Helper to determine the largest native vector type we can use
+template <int N>
+struct GetVectorType {
+  // Default to scalar float if nothing larger fits
+  using type = float;
+  static constexpr int size = 1;
+};
+
+// Specialization for 128-bit (4 floats)
+template <>
+struct GetVectorType<4> {
+  using type = float4;
+  static constexpr int size = 4;
+};
+// Specialization for 64-bit (2 floats)
+template <>
+struct GetVectorType<2> {
+  using type = float2;
+  static constexpr int size = 2;
+};
+
+// 2. The recursive loader function
+// T: The element type (float)
+// N: The remaining number of elements to load
+template <int N, typename T>
+__device__ __forceinline__ void load_vectorized(T* dst, const T* src) {
+  static_assert(sizeof(T) == 4);
+  if constexpr (N >= 4) {
+    // Load 128 bits (float4)
+    using VecType = typename GetVectorType<4>::type;
+
+    *reinterpret_cast<VecType*>(dst) = *reinterpret_cast<const VecType*>(src);
+
+    // Recurse for the rest
+    load_vectorized<N - 4>(dst + 4, src + 4);
+  } else if constexpr (N >= 2) {
+    // Load 64 bits (float2)
+    using VecType = typename GetVectorType<2>::type;
+
+    *reinterpret_cast<VecType*>(dst) = *reinterpret_cast<const VecType*>(src);
+
+    load_vectorized<N - 2>(dst + 2, src + 2);
+  } else if constexpr (N == 1) {
+    // Load 32 bits (scalar)
+    *dst = *src;
+  }
+}
 template <std::integral T>
 __host__ __device__ constexpr T floor(const T num, const T factor) {
   return num / factor * factor;

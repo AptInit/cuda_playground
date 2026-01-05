@@ -1,72 +1,116 @@
+#include <cooperative_groups.h>
 #include <cuda_runtime.h>
 
 #include "cute/layout.hpp"
+#include "cute/tensor.hpp"
 #include "cute_gemm.h"
 #include "util.hpp"
 
-template <auto kernelTile, unsigned tileK, typename TLA, typename TLB,
-    typename TLDst, typename PredFunc>
-__device__ static void kernel_block(const unsigned tileA_idx,
-    const unsigned tileB_idx, const unsigned tile_idx, const TLA& tiledA,
-    const TLB& tiledB, const TLDst& tiledDst, PredFunc predicate,
-    const float* A, const float* B, const float* C, float* dst) {
-  constexpr unsigned tileN = cute::size<0>(kernelTile);
-  constexpr unsigned tileM = cute::size<1>(kernelTile);
-  // (tileM, tileKHi), tileKLo
-  __shared__ float scratchA_SMEM[tileM * tileK / 32][32];
-  // tileK, tileN
-  __shared__ float scratchB_SMEM[tileK * tileN / 32][32];
-  const auto localCoord = cute::make_coord(threadIdx.x, threadIdx.y);
-  const auto idxDst = tiledDst(localCoord, tile_idx);
-  const auto [isValidN, isValidM] =
-      predicate(cute::crd2idx(localCoord, kernelTile), tile_idx);
-  const bool isValid = isValidN && isValidM;
-  float acc = isValid ? C[idxDst] : 0.0f;
-  const unsigned dimK = cute::size<0>(cute::shape<0>(tiledA));
-  // Don't want to spam layout algebra here
-  const auto cntK = dimK / tileK;
-  for (unsigned tileKIdx = 0; tileKIdx < cntK; ++tileKIdx) {
-    const auto kOffset = tileKIdx * tileK;
-    // Load scratch
-    __syncthreads();
-    for (unsigned i = 0; i < tileK * tileM; i += tileM * tileN) {
-      scratchA_SMEM[threadIdx.y * tileK / 32 + i / tileM / 32][threadIdx.x] =
-          isValidM
-              ? A[tiledA(cute::make_coord(kOffset + i / tileM + threadIdx.x,
-                             cute::get<1>(localCoord)),
-                    tileA_idx)]
-              : 0.0f;
+template <unsigned aSMEMLoadFactor_, unsigned blkN_, unsigned blkM_,
+    unsigned blkK_>
+struct BlkCfg {
+  // Skip predication on N and M?
+  bool nMPredSkip{};
+  // How many elements should a thread load from aTen's SMEM per thread?
+  cute::Int<aSMEMLoadFactor_> aSLdFactor{};
+  cute::Int<blkN_> blkN{};
+  cute::Int<blkM_> blkM{};
+  cute::Int<blkK_> blkK{};
+};
+
+template <BlkCfg cfg, bool kPredSkip, typename TAS, typename TBS, typename TA,
+    typename TB, typename TPred, typename TWldShape>
+__device__ __forceinline__ static void tiny_loop(float& acc, TAS aSTen,
+    TBS bSTen, const TA a_ttiled, const TB b_ttiled, const TPred id_ttiled,
+    const TWldShape worldShape) {
+  using namespace cute;
+  // load scratch
+  static_assert(cfg.blkK % cfg.blkN == 0);
+  __syncthreads();
+  if constexpr (cfg.nMPredSkip && kPredSkip) {
+    for (unsigned laOffset = threadIdx.x; laOffset < cfg.blkK;
+        laOffset += cfg.blkN) {
+      aSTen(laOffset, threadIdx.y) = a_ttiled(laOffset, threadIdx.y);
     }
-    for (unsigned i = 0; i < tileK * tileN; i += tileM * tileN) {
-      scratchB_SMEM[threadIdx.y + i / tileN][threadIdx.x] =
-          isValidN ? B[tiledB(cute::make_coord(cute::get<0>(localCoord),
-                                  kOffset + i / tileN + threadIdx.y),
-                         tileB_idx)]
-                   : 0.0f;
+    for (unsigned lbOffset = 0; lbOffset < cfg.blkK; lbOffset += cfg.blkM) {
+      bSTen(threadIdx.x, lbOffset + threadIdx.y) =
+          b_ttiled(threadIdx.x, lbOffset + threadIdx.y);
     }
-    __syncthreads();
-    // for (unsigned kBase=0; kBase<tileK; kBase+=32) {
-    //     const auto tempA =
-    //     scratchA_SMEM[threadIdx.y*tileK/32+kBase/32][threadIdx.x];
-    //     __syncwarp();
-    //     for (unsigned kIdx=0; kIdx<32;++kIdx) {
-    //         acc += __shfl_sync(0xFFFFFFFF, tempA, kIdx) *
-    //         scratchB_SMEM[(kIdx+kBase)*(tileN/32)+threadIdx.x/32][threadIdx.x%32];
-    //     }
-    // }
-    for (unsigned k = 0; k < tileK; ++k) {
-      acc +=
-          scratchA_SMEM[threadIdx.y * tileK / 32 + k / 32][k % 32] *
-          scratchB_SMEM[k * (tileN / 32) + threadIdx.x / 32][threadIdx.x % 32];
+  } else {
+    for (unsigned laOffset = threadIdx.x; laOffset < cfg.blkK;
+        laOffset += cfg.blkN) {
+      const bool loadA =
+          (cfg.nMPredSkip ||
+              elem_less(id_ttiled(_0{}, _0{}, threadIdx.y), worldShape)) &&
+          (kPredSkip || elem_less(id_ttiled(_0{}, laOffset, _0{}), worldShape));
+      aSTen(laOffset, threadIdx.y) =
+          loadA ? a_ttiled(laOffset, threadIdx.y) : 0.0f;
+    }
+    for (unsigned lbOffset = threadIdx.y; lbOffset < cfg.blkK;
+        lbOffset += cfg.blkM) {
+      const bool loadB =
+          (cfg.nMPredSkip ||
+              elem_less(id_ttiled(threadIdx.x, _0{}, _0{}), worldShape)) &&
+          (kPredSkip || elem_less(id_ttiled(_0{}, lbOffset, _0{}), worldShape));
+      bSTen(threadIdx.x, lbOffset) =
+          loadB ? b_ttiled(threadIdx.x, lbOffset) : 0.0f;
     }
   }
-  if (isValid) {
-    for (unsigned k = cntK * tileK; k < dimK; ++k) {
-      acc +=
-          A[tiledA(cute::make_coord(k, cute::get<1>(localCoord)), tileA_idx)] *
-          B[tiledB(cute::make_coord(cute::get<0>(localCoord), k), tileB_idx)];
+  // compute
+  __syncthreads();
+  static_assert(cfg.blkK % cfg.aSLdFactor == 0 && cfg.aSLdFactor < cfg.blkN);
+  for (unsigned kBase = 0; kBase < cfg.blkK; kBase += cfg.aSLdFactor) {
+    struct alignas(sizeof(float) * cfg.aSLdFactor) {
+      float s[cfg.aSLdFactor];
+    } aTmp;
+    util::load_vectorized<cfg.aSLdFactor>(aTmp.s, &aSTen(kBase, threadIdx.y));
+    for (unsigned kIt = 0; kIt < cfg.aSLdFactor; ++kIt) {
+      acc += aTmp.s[kIt] * bSTen(threadIdx.x, kIt + kBase);
     }
-    dst[idxDst] = acc;
+  }
+}
+
+template <BlkCfg cfg, typename TA, typename TB, typename TC, typename TDst,
+    typename TPred, typename TWldShape>
+__device__ __forceinline__ static void kernel_block(const TA a_tiled,
+    const TB b_tiled, const TC c_tiled, const TDst dst_tiled,
+    const TPred id_tiled, const TWldShape worldShape) {
+  using namespace cute;
+  constexpr auto aSMEMLayout = make_layout(make_shape(cfg.blkK, cfg.blkM));
+  __shared__ float aS[decltype(cosize(aSMEMLayout))::value];
+  auto aSTen = make_tensor(make_smem_ptr(aS), aSMEMLayout);
+  auto aTTiled = zipped_divide(a_tiled, aSMEMLayout.shape());
+  constexpr auto bSMEMLayout = make_layout(make_shape(cfg.blkN, cfg.blkK));
+  __shared__ float bS[decltype(cosize(bSMEMLayout))::value];
+  auto bSTen = make_tensor(make_smem_ptr(bS), bSMEMLayout);
+  auto bTTiled = zipped_divide(b_tiled, bSMEMLayout.shape());
+  auto idTTiled =
+      zipped_divide(id_tiled, make_tile(cfg.blkN, cfg.blkK, cfg.blkM));
+  const auto coord = make_coord(threadIdx.x, threadIdx.y);
+  const bool isValid =
+      cfg.nMPredSkip ||
+      elem_less(id_tiled(threadIdx.x, _0{}, threadIdx.y), worldShape);
+  float acc = isValid ? c_tiled(coord) : 0.0f;
+  // Tile over K, this should be done at upper level TBH
+  //  Compiler should optimize this through inlining
+  const bool partialK = get<1>(worldShape) % cfg.blkK;
+  const unsigned kCnt = get<1>(worldShape) / cfg.blkK;
+  for (unsigned tileIdx = 0; tileIdx < kCnt; ++tileIdx) {
+    tiny_loop<cfg, true>(acc, aSTen, bSTen,
+        local_tile(a_tiled, aSMEMLayout.shape(), tileIdx),
+        local_tile(b_tiled, bSMEMLayout.shape(), tileIdx),
+        local_tile(id_tiled, make_tile(cfg.blkN, cfg.blkK, cfg.blkM), tileIdx),
+        worldShape);
+  }
+  if (partialK) {
+    tiny_loop<cfg, false>(acc, aSTen, bSTen,
+        local_tile(a_tiled, aSMEMLayout.shape(), kCnt),
+        local_tile(b_tiled, bSMEMLayout.shape(), kCnt),
+        local_tile(id_tiled, make_tile(cfg.blkN, cfg.blkK, cfg.blkM), kCnt),
+        worldShape);
+  }
+  if (isValid) {
+    dst_tiled(coord) = acc;
   }
 }
 
@@ -75,60 +119,67 @@ template <unsigned grid_x, unsigned grid_y, unsigned grid_z, unsigned block_x,
 __global__ static void kernel_grid_v2(const unsigned m, const unsigned n,
     const unsigned k, const float* A, const float* B, const float* C,
     float* dst) {
+  // Integer intensity is ridiculous
   using namespace cute;
-  constexpr dim3 grid{grid_x, grid_y, grid_z}, block{block_x, block_y, block_z};
-  static_assert(block.z == 1 && grid.z == 1, "2D tiling");
+  namespace cg = cooperative_groups;
+  constexpr dim3 Grid_{grid_x, grid_y, grid_z},
+      Block_{block_x, block_y, block_z};
+  constexpr auto Grid = util::SDim3<Grid_>{};
+  constexpr auto Block = util::SDim3<Block_>{};
+  static_assert(Grid.z == 1, "2-D grid");
+
+
+  // Build tilers based on kernel config
+  //  Tunable
+  using Cfg = BlkCfg<4, Block.x, Block.y, 96>;
+  // Build tilers
+  const auto gridTiler = make_tile(Grid.x, k, Grid.y);
+  const auto blockTiler = make_tile(Block.x, k, Block.y);
+
+
+  // Define problem space
+  const auto world = make_shape(n, k, m);
+  const auto worldI = make_identity_tensor(world);
   // All matrices are row-major, but CuTe uses colexicographical order, follow
   // CuTe's convention
-  auto get_layout = [] __device__(const auto d0, const auto d1) {
-    const auto shape = cute::make_shape(d0, d1);
-    return make_layout(shape);
-  };
-  const auto layoutA = get_layout(k, m);
-  const auto layoutB = get_layout(n, k);
-  const auto layoutC = get_layout(n, m);
-  const auto layoutDst = layoutC;
-  // Create tilers for matrices, bottom-up for now, so block-level first
-  constexpr auto blockTiler =
-      Shape<cute::C<block.x>, cute::C<block.y>>{};  // tileN, tileM
-  const auto blkTilerA = make_shape(k, cute::shape<1>(blockTiler));
-  const auto blkTilerB = make_shape(cute::shape<0>(blockTiler), k);
-  // Tile the problem
-  const auto blkTiledA = zipped_divide(layoutA, blkTilerA);
-  const auto blkTiledB = zipped_divide(layoutB, blkTilerB);
-  const auto blkTiledDst = zipped_divide(layoutDst, blockTiler);
-  // Get bounds checker layout for each basis
-  const auto boundsBlkDstN = zipped_divide(
-      make_layout(layoutDst.shape(), make_stride(_1{}, _0{})), blockTiler);
-  const auto boundsBlkDstM = zipped_divide(
-      make_layout(layoutDst.shape(), make_stride(_0{}, _1{})), blockTiler);
-  auto predicate = [=] __device__(auto local_idx, auto tile_idx) {
-    return std::make_tuple(
-        boundsBlkDstN(local_idx, tile_idx) < cute::size<0>(layoutDst),
-        boundsBlkDstM(local_idx, tile_idx) < cute::size<1>(layoutDst));
-  };
-  // Grid-level tilers
-  const auto gridDomain = make_layout(cute::shape<1>(blkTiledDst));
-  constexpr auto gridTiler =
-      Shape<cute::C<grid.x>, cute::C<grid.y>>{};  // blockN, blockM
-  const auto grdTiledDst = zipped_divide(gridDomain, gridTiler);
-  // Loop through the GEMM problem
+  const auto aTen = make_tensor(A, make_layout(make_shape(k, m)));
+  const auto bTen = make_tensor(B, make_layout(make_shape(n, k)));
+  const auto cTen = make_tensor(C, make_layout(make_shape(n, m)));
+  auto dstTen = make_tensor(dst, cTen.layout());
+  // CuTe severely lacks hierarchy manipulation tools
+  //  This is a really roundabout way to do CTA-level predication
+  // Build hierarchy bottom-up
+  const auto cBlkTiled = zipped_divide(cTen.layout(), select<0, 2>(blockTiler));
+  const auto cGrdTiled =
+      zipped_divide(get<1>(cBlkTiled), select<0, 2>(gridTiler));
+  const auto cHier = make_layout(get<0>(cBlkTiled), cGrdTiled);
+  // CTA-wide predication
+  const auto cGrdPred = zipped_divide(
+      make_identity_tensor(shape<1>(cBlkTiled)), select<0, 2>(gridTiler));
   const auto blockCoord = make_coord(blockIdx.x, blockIdx.y);
-  // shared memory
-  for (unsigned gridIdx = 0; gridIdx < cute::size<1>(grdTiledDst); ++gridIdx) {
-    const auto tileIdx = grdTiledDst(blockCoord, gridIdx);
-    if (tileIdx >= cute::size(gridDomain)) {
-      continue;
+  for (unsigned gridIdx = 0; gridIdx < size<1>(cGrdTiled); ++gridIdx) {
+    const auto cTileCoord = cGrdPred(blockCoord, gridIdx);
+    if (elem_less(cTileCoord, shape<1>(cBlkTiled))) {
+      // Do stuff
+      const auto tileCoord =
+          make_coord(get<0>(cTileCoord), _0{}, get<1>(cTileCoord));
+      const auto aTiled =
+          local_tile(aTen, blockTiler, tileCoord, Step<X, _1, _1>{});
+      const auto bTiled =
+          local_tile(bTen, blockTiler, tileCoord, Step<_1, _1, X>{});
+      const auto cTiled =
+          local_tile(cTen, blockTiler, tileCoord, Step<_1, X, _1>{});
+      const auto dstTiled =
+          local_tile(dstTen, blockTiler, tileCoord, Step<_1, X, _1>{});
+      const auto probITiled = local_tile(worldI, blockTiler, tileCoord);
+      if (elem_less(probITiled(Block.x - _1{}, _0{}, Block.y - _1{}), world)) {
+        kernel_block<Cfg{true}>(
+            aTiled, bTiled, cTiled, dstTiled, probITiled, shape(world));
+      } else {
+        kernel_block<Cfg{false}>(
+            aTiled, bTiled, cTiled, dstTiled, probITiled, shape(world));
+      }
     }
-    auto tileCoord = idx2crd(tileIdx, cute::get<1>(blkTiledDst).shape());
-    auto tileCoordA = make_coord(_0{}, cute::get<1>(tileCoord));
-    auto tileCoordB = make_coord(cute::get<0>(tileCoord), _0{});
-    // Convert 2D tile coordinates to linear indices using crd2idx
-    auto tileIdxA = crd2idx(tileCoordA, cute::get<1>(blkTiledA).shape());
-    auto tileIdxB = crd2idx(tileCoordB, cute::get<1>(blkTiledB).shape());
-    constexpr unsigned int tileK = 32;
-    kernel_block<blockTiler, tileK>(tileIdxA, tileIdxB, tileIdx, blkTiledA,
-        blkTiledB, blkTiledDst, predicate, A, B, C, dst);
   }
 }
 
@@ -162,8 +213,8 @@ void gemm_f32_rrrr_cuda_v2(const unsigned m, const unsigned n, const unsigned k,
   const auto matC = CuPtr(m * n, C);
   auto matD = CuPtr<float>(m * n);
   // Kernel
-  constexpr dim3 grid = {12, 48, 1};
-  constexpr dim3 block = {32, 4, 1};
+  constexpr dim3 grid = {128, 128, 1};
+  constexpr dim3 block = {32, 32, 1};
   kernel_grid_v2_caller<grid, block>(
       m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
   cudaMemcpy(dst, matD.ptr(), sizeof(float) * m * n, cudaMemcpyDeviceToHost);
