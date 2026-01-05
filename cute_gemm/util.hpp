@@ -80,6 +80,24 @@ template <std::integral T>
 __host__ __device__ constexpr std::tuple<T, T> lcm_gcd(const T a, const T b) {
   return {std::lcm(a, b), std::gcd(a, b)};
 }
+template <std::integral T>
+__host__ __device__ consteval T static_logk(T num, const T base) {
+  T result = 0;
+  while (num > base) {
+    num /= base;
+    result += 1;
+  }
+  return result + (num == base);
+}
+template <std::integral T>
+__host__ __device__ consteval T static_powk(T num, const T base) {
+  T result = 1;
+  while (num > 0) {
+    num -= 1;
+    result *= base;
+  }
+  return result;
+}
 inline void log(const std::optional<std::string_view>& prompt = std::nullopt,
     const std::source_location& location = std::source_location::current()) {
   std::cout << "" << location.file_name() << ':' << location.line() << ' '
