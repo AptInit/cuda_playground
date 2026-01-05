@@ -43,8 +43,8 @@ __device__ __forceinline__ static void tiny_loop(TACCR& accTile, TAS aSTen,
 
     for (unsigned lbOffset = 0; lbOffset < cfg.blkK; lbOffset += cfg.blkM) {
       for (unsigned tn = 0; tn < cfg.thN; ++tn) {
-        bSTen(threadIdx.x * cfg.thN + tn, lbOffset + threadIdx.y) =
-            b_ttiled(threadIdx.x * cfg.thN + tn, lbOffset + threadIdx.y);
+        bSTen(threadIdx.x + tn * cfg.blkN, lbOffset + threadIdx.y) =
+            b_ttiled(threadIdx.x + tn * cfg.blkN, lbOffset + threadIdx.y);
       }
     }
   } else {
@@ -77,11 +77,17 @@ __device__ __forceinline__ static void tiny_loop(TACCR& accTile, TAS aSTen,
   }
   // compute
   __syncthreads();
-  for (unsigned k = 0; k < cfg.blkK; ++k) {
+  for (unsigned kBase = 0; kBase < cfg.blkK; kBase+=cfg.thM) {
     for (unsigned tm = 0; tm < cfg.thM; ++tm) {
-      for (unsigned tn = 0; tn < cfg.thN; ++tn) {
-        accTile(tn, tm) += aSTen(k, threadIdx.y * cfg.thM + tm) *
-                           bSTen(threadIdx.x * cfg.thN + tn, k);
+      auto aTmp = make_tensor<float>(make_shape(cfg.thM));
+      util::load_vectorized<cfg.thM, float>(&aTmp(_0{}), &aSTen(kBase, threadIdx.y * cfg.thM + tm));
+      for (unsigned kI=0; kI<cfg.thM; ++kI) {
+        const auto k = kBase + kI;
+        auto bTmp = make_tensor<float>(make_shape(cfg.thN));
+        util::load_vectorized<cfg.thN, float>(&bTmp(_0{}), &bSTen(threadIdx.x * cfg.thN, k));
+        for (unsigned tn = 0; tn < cfg.thN; ++tn) {
+          accTile(tn, tm) += aTmp(kI) * bTmp(tn);
+        }
       }
     }
   }
@@ -94,7 +100,7 @@ __device__ __forceinline__ static void kernel_block(const TA a_tiled,
     const TPred id_tiled, const TWldShape worldShape) {
   using namespace cute;
   // Swizzled layout for aSTen to reduce SMEM bank conflicts
-  constexpr auto aSMEMSwizzle = cute::Swizzle<2, 0, 4>{};
+  constexpr auto aSMEMSwizzle = cute::Swizzle<2, log_2(static_cast<unsigned>(cfg.thM)), 4>{};
   constexpr auto aSMEMLayoutBase =
       make_layout(make_shape(cfg.blkK, cfg.blkM * cfg.thM));
   constexpr auto aSMEMLayout = cute::composition(aSMEMSwizzle, aSMEMLayoutBase);

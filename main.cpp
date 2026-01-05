@@ -43,14 +43,14 @@ int main() {
     int M, N, K;
   };
   TestCase tests[] = {
+      {191, 385, 6536},    // Original: partial M
       {4096, 4096, 4096},  // Original: partial M
-      {192, 384, 65536},  // Original: partial M
-      {24, 32, 65536},    // Full tiles
-      {1, 32, 65536},     // Extreme partial M
-      {48, 31, 65536},    // Partial N
-      {23, 17, 65536},    // Partial M and N
-      {100, 100, 1000},   // Larger problem
-      {1, 1, 95},         // Minimal size
+      {24, 32, 65536},     // Full tiles
+      {1, 32, 65536},      // Extreme partial M
+      {48, 31, 65536},     // Partial N
+      {23, 17, 65536},     // Partial M and N
+      {100, 100, 1000},    // Larger problem
+      {1, 1, 95},          // Minimal size
   };
 
   bool all_pass = true;

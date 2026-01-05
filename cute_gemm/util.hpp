@@ -85,6 +85,15 @@ inline void log(const std::optional<std::string_view>& prompt = std::nullopt,
   std::cout << "" << location.file_name() << ':' << location.line() << ' '
             << (prompt.has_value() ? prompt.value() : "") << std::endl;
 }
+
+inline void check_cuda(const cudaError_t &ret_code,
+  const std::source_location& location = std::source_location::current()) {
+  if (ret_code != cudaSuccess) {
+    log(cudaGetErrorString(ret_code), location);
+    abort();
+  }
+}
+
 template <typename T>
 class CuPtr {
   static_assert(std::is_trivially_copyable_v<T>);
