@@ -80,7 +80,8 @@ __device__ __forceinline__ static void tiny_loop(TACCR& accTile, TAS aSTen,
   for (unsigned k = 0; k < cfg.blkK; ++k) {
     for (unsigned tm = 0; tm < cfg.thM; ++tm) {
       for (unsigned tn = 0; tn < cfg.thN; ++tn) {
-        accTile(tn, tm) += aSTen(k, threadIdx.y*cfg.thM+tm) * bSTen(threadIdx.x*cfg.thN+tn, k);
+        accTile(tn, tm) += aSTen(k, threadIdx.y * cfg.thM + tm) *
+                           bSTen(threadIdx.x * cfg.thN + tn, k);
       }
     }
   }
@@ -107,16 +108,19 @@ __device__ __forceinline__ static void kernel_block(const TA a_tiled,
   if constexpr (cfg.nMPredSkip) {
     for (unsigned tm = 0; tm < cfg.thM; ++tm) {
       for (unsigned tn = 0; tn < cfg.thN; ++tn) {
-        accTile(tn, tm) = c_tiled(threadIdx.x*cfg.thN + tn, threadIdx.y*cfg.thM + tm);
+        accTile(tn, tm) =
+            c_tiled(threadIdx.x * cfg.thN + tn, threadIdx.y * cfg.thM + tm);
       }
     }
   } else {
     for (unsigned tm = 0; tm < cfg.thM; ++tm) {
       for (unsigned tn = 0; tn < cfg.thN; ++tn) {
-        const bool isValid = elem_less(
-            id_tiled(threadIdx.x*cfg.thN + tn, _0{}, threadIdx.y*cfg.thM + tm), worldShape);
-        accTile(tn, tm) =
-            isValid ? c_tiled(threadIdx.x*cfg.thN + tn, threadIdx.y*cfg.thM + tm) : 0.0f;
+        const bool isValid = elem_less(id_tiled(threadIdx.x * cfg.thN + tn,
+                                           _0{}, threadIdx.y * cfg.thM + tm),
+            worldShape);
+        accTile(tn, tm) = isValid ? c_tiled(threadIdx.x * cfg.thN + tn,
+                                        threadIdx.y * cfg.thM + tm)
+                                  : 0.0f;
       }
     }
   }
@@ -145,16 +149,19 @@ __device__ __forceinline__ static void kernel_block(const TA a_tiled,
   if constexpr (cfg.nMPredSkip) {
     for (unsigned tm = 0; tm < cfg.thM; ++tm) {
       for (unsigned tn = 0; tn < cfg.thN; ++tn) {
-        dst_tiled(threadIdx.x*cfg.thN + tn, threadIdx.y*cfg.thM + tm) = accTile(tn, tm);
+        dst_tiled(threadIdx.x * cfg.thN + tn, threadIdx.y * cfg.thM + tm) =
+            accTile(tn, tm);
       }
     }
   } else {
     for (unsigned tm = 0; tm < cfg.thM; ++tm) {
       for (unsigned tn = 0; tn < cfg.thN; ++tn) {
-        const bool isValid = elem_less(
-            id_tiled(threadIdx.x*cfg.thN + tn, _0{}, threadIdx.y*cfg.thM + tm), worldShape);
+        const bool isValid = elem_less(id_tiled(threadIdx.x * cfg.thN + tn,
+                                           _0{}, threadIdx.y * cfg.thM + tm),
+            worldShape);
         if (isValid)
-          dst_tiled(threadIdx.x*cfg.thN + tn, threadIdx.y*cfg.thM + tm) = accTile(tn, tm);
+          dst_tiled(threadIdx.x * cfg.thN + tn, threadIdx.y * cfg.thM + tm) =
+              accTile(tn, tm);
       }
     }
   }
@@ -162,9 +169,9 @@ __device__ __forceinline__ static void kernel_block(const TA a_tiled,
 
 template <unsigned grid_x, unsigned grid_y, unsigned grid_z, unsigned block_x,
     unsigned block_y, unsigned block_z>
-__global__ static void __launch_bounds__(block_x*block_y) kernel_grid_v3(const unsigned m, const unsigned n,
-    const unsigned k, const float* A, const float* B, const float* C,
-    float* dst) {
+__global__ static void __launch_bounds__(block_x* block_y)
+    kernel_grid_v3(const unsigned m, const unsigned n, const unsigned k,
+        const float* A, const float* B, const float* C, float* dst) {
   // Integer intensity is ridiculous
   using namespace cute;
   namespace cg = cooperative_groups;
@@ -180,8 +187,8 @@ __global__ static void __launch_bounds__(block_x*block_y) kernel_grid_v3(const u
   using Cfg = BlkCfg<Block.x, Block.y, 32, 2, 2>;
   // Build tilers
   const auto gridTiler = make_tile(Grid.x, k, Grid.y);
-  const auto blockTiler =
-      make_tile(Block.x * typename Cfg::ThN{}, k, Block.y * typename Cfg::ThM{});
+  const auto blockTiler = make_tile(
+      Block.x * typename Cfg::ThN{}, k, Block.y * typename Cfg::ThM{});
 
 
   // Define problem space
