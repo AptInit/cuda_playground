@@ -1,7 +1,7 @@
 enable_language(CUDA)
 find_package(CUDAToolkit REQUIRED)
 
-add_library(cute_gemm STATIC demo2.cu demo1.cu demo0.cu)
+add_library(cute_gemm STATIC demo3.cu demo2.cu demo1.cu demo0.cu)
 target_compile_options(cute_gemm PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:
         --expt-relaxed-constexpr

@@ -16,3 +16,7 @@ void gemm_f32_row_row_row_row_cuda(size_t m, size_t n, size_t k, const float* A,
 // demo2.cu
 void gemm_f32_rrrr_cuda_v2(unsigned m, unsigned n, unsigned k, const float* A,
     const float* B, const float* C, float* dst);
+
+// demo3.cu
+void gemm_f32_rrrr_cuda_v3(unsigned m, unsigned n, unsigned k, const float* A,
+    const float* B, const float* C, float* dst);

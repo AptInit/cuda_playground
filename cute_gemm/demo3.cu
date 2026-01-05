@@ -6,21 +6,26 @@
 #include "cute_gemm.h"
 #include "util.hpp"
 
-template <unsigned aSMEMLoadFactor_, unsigned blkN_, unsigned blkM_,
-    unsigned blkK_>
+template <unsigned blkN_, unsigned blkM_, unsigned blkK_, unsigned thN_,
+    unsigned thM_>
 struct BlkCfg {
   // Skip predication on N and M?
   bool nMPredSkip{};
-  // How many elements should a thread load from aTen's SMEM per thread?
-  cute::Int<aSMEMLoadFactor_> aSLdFactor{};
+  // blockDim.x
   cute::Int<blkN_> blkN{};
+  // blockDim.y
   cute::Int<blkM_> blkM{};
   cute::Int<blkK_> blkK{};
+  // Each thread covers a (thN, thM) tile
+  using ThN = cute::Int<thN_>;
+  ThN thN{};
+  using ThM = cute::Int<thM_>;
+  ThM thM{};
 };
 
-template <BlkCfg cfg, bool kPredSkip, typename TAS, typename TBS, typename TA,
-    typename TB, typename TPred, typename TWldShape>
-__device__ __forceinline__ static void tiny_loop(float& acc, TAS aSTen,
+template <BlkCfg cfg, bool kPredSkip, typename TACCR, typename TAS,
+    typename TBS, typename TA, typename TB, typename TPred, typename TWldShape>
+__device__ __forceinline__ static void tiny_loop(TACCR& accTile, TAS aSTen,
     TBS bSTen, const TA a_ttiled, const TB b_ttiled, const TPred id_ttiled,
     const TWldShape worldShape) {
   using namespace cute;
@@ -28,44 +33,55 @@ __device__ __forceinline__ static void tiny_loop(float& acc, TAS aSTen,
   static_assert(cfg.blkK % cfg.blkN == 0);
   __syncthreads();
   if constexpr (cfg.nMPredSkip && kPredSkip) {
-    for (unsigned laOffset = threadIdx.x; laOffset < cfg.blkK;
-        laOffset += cfg.blkN) {
-      aSTen(laOffset, threadIdx.y) = a_ttiled(laOffset, threadIdx.y);
+    for (unsigned tm = 0; tm < cfg.thM; ++tm) {
+      for (unsigned laOffset = threadIdx.x; laOffset < cfg.blkK;
+          laOffset += cfg.blkN) {
+        aSTen(laOffset, threadIdx.y + tm * cfg.blkM) =
+            a_ttiled(laOffset, threadIdx.y + tm * cfg.blkM);
+      }
     }
+
     for (unsigned lbOffset = 0; lbOffset < cfg.blkK; lbOffset += cfg.blkM) {
-      bSTen(threadIdx.x, lbOffset + threadIdx.y) =
-          b_ttiled(threadIdx.x, lbOffset + threadIdx.y);
+      for (unsigned tn = 0; tn < cfg.thN; ++tn) {
+        bSTen(threadIdx.x * cfg.thN + tn, lbOffset + threadIdx.y) =
+            b_ttiled(threadIdx.x * cfg.thN + tn, lbOffset + threadIdx.y);
+      }
     }
   } else {
-    for (unsigned laOffset = threadIdx.x; laOffset < cfg.blkK;
-        laOffset += cfg.blkN) {
-      const bool loadA =
-          (cfg.nMPredSkip ||
-              elem_less(id_ttiled(_0{}, _0{}, threadIdx.y), worldShape)) &&
-          (kPredSkip || elem_less(id_ttiled(_0{}, laOffset, _0{}), worldShape));
-      aSTen(laOffset, threadIdx.y) =
-          loadA ? a_ttiled(laOffset, threadIdx.y) : 0.0f;
+    for (unsigned tm = 0; tm < cfg.thM; ++tm) {
+      for (unsigned laOffset = threadIdx.x; laOffset < cfg.blkK;
+          laOffset += cfg.blkN) {
+        const bool loadA =
+            (cfg.nMPredSkip ||
+                elem_less(id_ttiled(_0{}, _0{}, threadIdx.y + tm * cfg.blkM),
+                    worldShape)) &&
+            (kPredSkip ||
+                elem_less(id_ttiled(_0{}, laOffset, _0{}), worldShape));
+        aSTen(laOffset, threadIdx.y + tm * cfg.blkM) =
+            loadA ? a_ttiled(laOffset, threadIdx.y + tm * cfg.blkM) : 0.0f;
+      }
     }
     for (unsigned lbOffset = threadIdx.y; lbOffset < cfg.blkK;
         lbOffset += cfg.blkM) {
-      const bool loadB =
-          (cfg.nMPredSkip ||
-              elem_less(id_ttiled(threadIdx.x, _0{}, _0{}), worldShape)) &&
-          (kPredSkip || elem_less(id_ttiled(_0{}, lbOffset, _0{}), worldShape));
-      bSTen(threadIdx.x, lbOffset) =
-          loadB ? b_ttiled(threadIdx.x, lbOffset) : 0.0f;
+      for (unsigned tn = 0; tn < cfg.thN; ++tn) {
+        const bool loadB =
+            (cfg.nMPredSkip ||
+                elem_less(id_ttiled(threadIdx.x * cfg.thN + tn, _0{}, _0{}),
+                    worldShape)) &&
+            (kPredSkip ||
+                elem_less(id_ttiled(_0{}, lbOffset, _0{}), worldShape));
+        bSTen(threadIdx.x * cfg.thN + tn, lbOffset) =
+            loadB ? b_ttiled(threadIdx.x * cfg.thN + tn, lbOffset) : 0.0f;
+      }
     }
   }
   // compute
   __syncthreads();
-  static_assert(cfg.blkK % cfg.aSLdFactor == 0 && cfg.aSLdFactor < cfg.blkN);
-  for (unsigned kBase = 0; kBase < cfg.blkK; kBase += cfg.aSLdFactor) {
-    struct alignas(sizeof(float) * cfg.aSLdFactor) {
-      float s[cfg.aSLdFactor];
-    } aTmp;
-    util::load_vectorized<cfg.aSLdFactor>(aTmp.s, &aSTen(kBase, threadIdx.y));
-    for (unsigned kIt = 0; kIt < cfg.aSLdFactor; ++kIt) {
-      acc += aTmp.s[kIt] * bSTen(threadIdx.x, kIt + kBase);
+  for (unsigned k = 0; k < cfg.blkK; ++k) {
+    for (unsigned tm = 0; tm < cfg.thM; ++tm) {
+      for (unsigned tn = 0; tn < cfg.thN; ++tn) {
+        accTile(tn, tm) += aSTen(k, threadIdx.y*cfg.thM+tm) * bSTen(threadIdx.x*cfg.thN+tn, k);
+      }
     }
   }
 }
@@ -76,43 +92,77 @@ __device__ __forceinline__ static void kernel_block(const TA a_tiled,
     const TB b_tiled, const TC c_tiled, const TDst dst_tiled,
     const TPred id_tiled, const TWldShape worldShape) {
   using namespace cute;
-  constexpr auto aSMEMLayout = make_layout(make_shape(cfg.blkK, cfg.blkM));
-  __shared__ float aS[decltype(cosize(aSMEMLayout))::value];
+  // Swizzled layout for aSTen to reduce SMEM bank conflicts
+  constexpr auto aSMEMSwizzle = cute::Swizzle<2, 0, 4>{};
+  constexpr auto aSMEMLayoutBase =
+      make_layout(make_shape(cfg.blkK, cfg.blkM * cfg.thM));
+  constexpr auto aSMEMLayout = cute::composition(aSMEMSwizzle, aSMEMLayoutBase);
+  __shared__ float aS[decltype(cosize(aSMEMLayoutBase))::value];
   auto aSTen = make_tensor(make_smem_ptr(aS), aSMEMLayout);
-  constexpr auto bSMEMLayout = make_layout(make_shape(cfg.blkN, cfg.blkK));
+  constexpr auto bSMEMLayout =
+      make_layout(make_shape(cfg.blkN * cfg.thN, cfg.blkK));
   __shared__ float bS[decltype(cosize(bSMEMLayout))::value];
   auto bSTen = make_tensor(make_smem_ptr(bS), bSMEMLayout);
-  const auto coord = make_coord(threadIdx.x, threadIdx.y);
-  const bool isValid =
-      cfg.nMPredSkip ||
-      elem_less(id_tiled(threadIdx.x, _0{}, threadIdx.y), worldShape);
-  float acc = isValid ? c_tiled(coord) : 0.0f;
+  auto accTile = make_tensor<float>(make_shape(cfg.blkN, cfg.blkM));
+  if constexpr (cfg.nMPredSkip) {
+    for (unsigned tm = 0; tm < cfg.thM; ++tm) {
+      for (unsigned tn = 0; tn < cfg.thN; ++tn) {
+        accTile(tn, tm) = c_tiled(threadIdx.x*cfg.thN + tn, threadIdx.y*cfg.thM + tm);
+      }
+    }
+  } else {
+    for (unsigned tm = 0; tm < cfg.thM; ++tm) {
+      for (unsigned tn = 0; tn < cfg.thN; ++tn) {
+        const bool isValid = elem_less(
+            id_tiled(threadIdx.x*cfg.thN + tn, _0{}, threadIdx.y*cfg.thM + tm), worldShape);
+        accTile(tn, tm) =
+            isValid ? c_tiled(threadIdx.x*cfg.thN + tn, threadIdx.y*cfg.thM + tm) : 0.0f;
+      }
+    }
+  }
+
   // Tile over K, this should be done at upper level TBH
   //  Compiler should optimize this through inlining
   const bool partialK = get<1>(worldShape) % cfg.blkK;
   const unsigned kCnt = get<1>(worldShape) / cfg.blkK;
   for (unsigned tileIdx = 0; tileIdx < kCnt; ++tileIdx) {
-    tiny_loop<cfg, true>(acc, aSTen, bSTen,
+    tiny_loop<cfg, true>(accTile, aSTen, bSTen,
         local_tile(a_tiled, aSMEMLayout.shape(), tileIdx),
         local_tile(b_tiled, bSMEMLayout.shape(), tileIdx),
-        local_tile(id_tiled, make_tile(cfg.blkN, cfg.blkK, cfg.blkM), tileIdx),
+        local_tile(id_tiled,
+            make_tile(cfg.blkN * cfg.thN, cfg.blkK, cfg.blkM * cfg.thM),
+            tileIdx),
         worldShape);
   }
   if (partialK) {
-    tiny_loop<cfg, false>(acc, aSTen, bSTen,
+    tiny_loop<cfg, false>(accTile, aSTen, bSTen,
         local_tile(a_tiled, aSMEMLayout.shape(), kCnt),
         local_tile(b_tiled, bSMEMLayout.shape(), kCnt),
-        local_tile(id_tiled, make_tile(cfg.blkN, cfg.blkK, cfg.blkM), kCnt),
+        local_tile(id_tiled,
+            make_tile(cfg.blkN * cfg.thN, cfg.blkK, cfg.blkM * cfg.thM), kCnt),
         worldShape);
   }
-  if (isValid) {
-    dst_tiled(coord) = acc;
+  if constexpr (cfg.nMPredSkip) {
+    for (unsigned tm = 0; tm < cfg.thM; ++tm) {
+      for (unsigned tn = 0; tn < cfg.thN; ++tn) {
+        dst_tiled(threadIdx.x*cfg.thN + tn, threadIdx.y*cfg.thM + tm) = accTile(tn, tm);
+      }
+    }
+  } else {
+    for (unsigned tm = 0; tm < cfg.thM; ++tm) {
+      for (unsigned tn = 0; tn < cfg.thN; ++tn) {
+        const bool isValid = elem_less(
+            id_tiled(threadIdx.x*cfg.thN + tn, _0{}, threadIdx.y*cfg.thM + tm), worldShape);
+        if (isValid)
+          dst_tiled(threadIdx.x*cfg.thN + tn, threadIdx.y*cfg.thM + tm) = accTile(tn, tm);
+      }
+    }
   }
 }
 
 template <unsigned grid_x, unsigned grid_y, unsigned grid_z, unsigned block_x,
     unsigned block_y, unsigned block_z>
-__global__ static void kernel_grid_v2(const unsigned m, const unsigned n,
+__global__ static void kernel_grid_v3(const unsigned m, const unsigned n,
     const unsigned k, const float* A, const float* B, const float* C,
     float* dst) {
   // Integer intensity is ridiculous
@@ -127,10 +177,11 @@ __global__ static void kernel_grid_v2(const unsigned m, const unsigned n,
 
   // Build tilers based on kernel config
   //  Tunable
-  using Cfg = BlkCfg<4, Block.x, Block.y, 96>;
+  using Cfg = BlkCfg<Block.x, Block.y, 32, 2, 2>;
   // Build tilers
   const auto gridTiler = make_tile(Grid.x, k, Grid.y);
-  const auto blockTiler = make_tile(Block.x, k, Block.y);
+  const auto blockTiler =
+      make_tile(Block.x * Cfg::ThN(), k, Block.y * Cfg::ThM());
 
 
   // Define problem space
@@ -168,7 +219,9 @@ __global__ static void kernel_grid_v2(const unsigned m, const unsigned n,
       const auto dstTiled =
           local_tile(dstTen, blockTiler, tileCoord, Step<_1, X, _1>{});
       const auto probITiled = local_tile(worldI, blockTiler, tileCoord);
-      if (elem_less(probITiled(Block.x - _1{}, _0{}, Block.y - _1{}), world)) {
+      if (elem_less(probITiled(Block.x * Cfg::ThN() - _1{}, _0{},
+                        Block.y * Cfg::ThM() - _1{}),
+              world)) {
         kernel_block<Cfg{true}>(
             aTiled, bTiled, cTiled, dstTiled, probITiled, shape(world));
       } else {
@@ -181,14 +234,14 @@ __global__ static void kernel_grid_v2(const unsigned m, const unsigned n,
 
 // cudafe++ struggles with CNTTP
 template <dim3 grid, dim3 block>
-static void kernel_grid_v2_caller(const unsigned m, const unsigned n,
+static void kernel_grid_v3_caller(const unsigned m, const unsigned n,
     const unsigned k, const float* A, const float* B, const float* C,
     float* dst) {
-  kernel_grid_v2<grid.x, grid.y, grid.z, block.x, block.y, block.z>
+  kernel_grid_v3<grid.x, grid.y, grid.z, block.x, block.y, block.z>
       <<<grid, block>>>(m, n, k, A, B, C, dst);
 }
 
-void gemm_f32_rrrr_cuda_v2(const unsigned m, const unsigned n, const unsigned k,
+void gemm_f32_rrrr_cuda_v3(const unsigned m, const unsigned n, const unsigned k,
     const float* A, const float* B, const float* C, float* dst) {
   using namespace util;
   int deviceCount = 0;
@@ -209,9 +262,9 @@ void gemm_f32_rrrr_cuda_v2(const unsigned m, const unsigned n, const unsigned k,
   const auto matC = CuPtr(m * n, C);
   auto matD = CuPtr<float>(m * n);
   // Kernel
-  constexpr dim3 grid = {128, 128, 1};
+  constexpr dim3 grid = {64, 64, 1};
   constexpr dim3 block = {32, 32, 1};
-  kernel_grid_v2_caller<grid, block>(
+  kernel_grid_v3_caller<grid, block>(
       m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
   cudaMemcpy(dst, matD.ptr(), sizeof(float) * m * n, cudaMemcpyDeviceToHost);
 }
