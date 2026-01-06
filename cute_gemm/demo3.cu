@@ -47,11 +47,15 @@ __device__ __forceinline__ static void tiny_loop(TACCR& accTile, TAS aSTen,
       }
     }
 
-    for (unsigned lbOffset = 0; lbOffset < cfg.blkK; lbOffset += cfg.blkM) {
+    for (unsigned lbOffset = threadIdx.y; lbOffset < cfg.blkK;
+        lbOffset += cfg.blkM) {
       for (unsigned tn = 0; tn < cfg.thN; ++tn) {
-        bSTen(threadIdx.x + tn * cfg.blkN, lbOffset + threadIdx.y) =
-            b_ttiled(threadIdx.x + tn * cfg.blkN, lbOffset + threadIdx.y);
+        bSTen(threadIdx.x + tn * cfg.blkN, lbOffset) =
+            b_ttiled(threadIdx.x + tn * cfg.blkN, lbOffset);
       }
+      // util::load_vectorized<cfg.thN, float>(
+      //     &bSTen(threadIdx.x * cfg.thN, lbOffset),
+      //     &b_ttiled(threadIdx.x * cfg.thN, lbOffset));
     }
   } else {
     for (unsigned tm = 0; tm < cfg.thM; ++tm) {
@@ -83,6 +87,7 @@ __device__ __forceinline__ static void tiny_loop(TACCR& accTile, TAS aSTen,
   }
   // compute
   __syncthreads();
+  static_assert(cfg.blkK % cfg.blkM == 0);
   for (unsigned kBase = 0; kBase < cfg.blkK; kBase += cfg.thM) {
     for (unsigned tm = 0; tm < cfg.thM; ++tm) {
       auto aTmp = make_tensor<float>(make_shape(cfg.thM));
@@ -122,6 +127,8 @@ __device__ __forceinline__ static void kernel_block(const TA a_tiled,
   auto accTile = make_tensor<float>(make_shape(cfg.blkN, cfg.blkM));
   if constexpr (cfg.nMPredSkip) {
     for (unsigned tm = 0; tm < cfg.thM; ++tm) {
+      // util::load_vectorized<cfg.thN, float>(&accTile(_0{}, tm),
+      //     &c_tiled(threadIdx.x * cfg.thN, threadIdx.y * cfg.thM + tm));
       for (unsigned tn = 0; tn < cfg.thN; ++tn) {
         accTile(tn, tm) =
             c_tiled(threadIdx.x * cfg.thN + tn, threadIdx.y * cfg.thM + tm);
@@ -163,6 +170,9 @@ __device__ __forceinline__ static void kernel_block(const TA a_tiled,
   }
   if constexpr (cfg.nMPredSkip) {
     for (unsigned tm = 0; tm < cfg.thM; ++tm) {
+      // util::load_vectorized<cfg.thN, float>(
+      //     &dst_tiled(threadIdx.x * cfg.thN, threadIdx.y * cfg.thM + tm),
+      //     &accTile(_0{}, tm));
       for (unsigned tn = 0; tn < cfg.thN; ++tn) {
         dst_tiled(threadIdx.x * cfg.thN + tn, threadIdx.y * cfg.thM + tm) =
             accTile(tn, tm);
@@ -253,7 +263,7 @@ __global__ static void __launch_bounds__(blkN_* blkM_)
 template <BlkCfg cfg>
 static void kernel_grid_v3_caller(const unsigned m, const unsigned n,
     const unsigned k, const float* A, const float* B, const float* C,
-    float* dst) {
+    float* dst, cudaStream_t stream = nullptr) {
   // Kernel caller's responsibility to set the correct grid dimensions
   dim3 grid{};
   grid.x = cfg.grd;
@@ -265,7 +275,7 @@ static void kernel_grid_v3_caller(const unsigned m, const unsigned n,
   dim3 block = {
       static_cast<unsigned>(cfg.blkN), static_cast<unsigned>(cfg.blkM), 1};
   kernel_grid_v3<cfg.grd, cfg.blkN, cfg.blkM, cfg.blkK, cfg.thN, cfg.thM>
-      <<<grid, block>>>(m, n, k, A, B, C, dst);
+      <<<grid, block, 0, stream>>>(m, n, k, A, B, C, dst);
 }
 
 void gemm_f32_rrrr_cuda_v3(const unsigned m, const unsigned n, const unsigned k,
@@ -281,7 +291,7 @@ void gemm_f32_rrrr_cuda_v3(const unsigned m, const unsigned n, const unsigned k,
     cudaSetDevice(i);
     cudaDeviceProp deviceProp;
     cudaGetDeviceProperties(&deviceProp, i);
-    std::cout << deviceProp.name << std::endl;
+    //std::cout << deviceProp.name << std::endl;
   }
   cudaSetDevice(0);
   const auto matA = CuPtr(m * k, A);
@@ -289,8 +299,51 @@ void gemm_f32_rrrr_cuda_v3(const unsigned m, const unsigned n, const unsigned k,
   const auto matC = CuPtr(m * n, C);
   auto matD = CuPtr<float>(m * n);
   // Kernel
-  using Cfg = BlkCfg<16, 32, 32, 32, 2, 2>;
+  using Cfg = BlkCfg<16, 16, 16, 32, 4, 4>;
   kernel_grid_v3_caller<Cfg{}>(
       m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
   cudaMemcpy(dst, matD.ptr(), sizeof(float) * m * n, cudaMemcpyDeviceToHost);
+}
+
+void gemm_f32_rrrr_cuda_v3_bench(
+    const unsigned m, const unsigned n, const unsigned k) {
+  using namespace util;
+  const auto matA = CuPtr<float>(m * k);
+  const auto matB = CuPtr<float>(k * n);
+  const auto matC = CuPtr<float>(m * n);
+  auto matD = CuPtr<float>(m * n);
+  auto dst = std::make_unique<float[]>(m * n);
+  cudaStream_t stream;
+  check_cuda(cudaStreamCreate(&stream));
+  // Kernel
+  #ifndef BENCH_CFG
+  using Cfg = BlkCfg<64, 16, 16, 32, 4, 4>;
+  #else
+  using Cfg = BENCH_CFG;
+  #endif
+  // Heat-up
+  for (int i = 0; i < 10; ++i) {
+    kernel_grid_v3_caller<Cfg{}>(
+        m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr(), stream);
+  }
+  // Record time elapsed with cuda event API
+  int repeatCnt = 50;
+  cudaEvent_t start, stop;
+  check_cuda(cudaEventCreate(&start));
+  check_cuda(cudaEventCreate(&stop));
+  check_cuda(cudaEventRecord(start, stream));
+  for (int i = 0; i < repeatCnt; ++i) {
+    kernel_grid_v3_caller<Cfg{}>(
+        m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr(), stream);
+  }
+  check_cuda(cudaEventRecord(stop, stream));
+  check_cuda(cudaEventSynchronize(stop));
+  float time;
+  check_cuda(cudaEventElapsedTime(&time, start, stop));
+  std::cout << "AVG: " << time / repeatCnt << " ms" << std::endl;
+  check_cuda(cudaEventDestroy(start));
+  check_cuda(cudaEventDestroy(stop));
+  check_cuda(cudaStreamDestroy(stream));
+  cudaMemcpy(
+      dst.get(), matD.ptr(), sizeof(float) * m * n, cudaMemcpyDeviceToHost);
 }

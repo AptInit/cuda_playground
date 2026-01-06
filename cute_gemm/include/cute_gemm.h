@@ -20,3 +20,5 @@ void gemm_f32_rrrr_cuda_v2(unsigned m, unsigned n, unsigned k, const float* A,
 // demo3.cu
 void gemm_f32_rrrr_cuda_v3(unsigned m, unsigned n, unsigned k, const float* A,
     const float* B, const float* C, float* dst);
+
+void gemm_f32_rrrr_cuda_v3_bench(unsigned m, unsigned n, unsigned k);

@@ -1,6 +1,8 @@
 build/
+build_autotune/
 .cache/
 .idea/
 cmake-build-*/
 cute_gemm/include/cute
 cute_gemm/include/cutlass
+__pycache__/
