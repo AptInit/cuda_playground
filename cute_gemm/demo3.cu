@@ -291,7 +291,7 @@ void gemm_f32_rrrr_cuda_v3(const unsigned m, const unsigned n, const unsigned k,
     cudaSetDevice(i);
     cudaDeviceProp deviceProp;
     cudaGetDeviceProperties(&deviceProp, i);
-    //std::cout << deviceProp.name << std::endl;
+    // std::cout << deviceProp.name << std::endl;
   }
   cudaSetDevice(0);
   const auto matA = CuPtr(m * k, A);
@@ -299,51 +299,62 @@ void gemm_f32_rrrr_cuda_v3(const unsigned m, const unsigned n, const unsigned k,
   const auto matC = CuPtr(m * n, C);
   auto matD = CuPtr<float>(m * n);
   // Kernel
-  using Cfg = BlkCfg<16, 16, 16, 32, 4, 4>;
+  // Found by autotune.py
+  using Cfg = BlkCfg<4,32,8,32,4,8>;
   kernel_grid_v3_caller<Cfg{}>(
       m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
   cudaMemcpy(dst, matD.ptr(), sizeof(float) * m * n, cudaMemcpyDeviceToHost);
 }
 
-void gemm_f32_rrrr_cuda_v3_bench(
-    const unsigned m, const unsigned n, const unsigned k) {
+void gemm_f32_rrrr_cuda_v3_bench(const unsigned m, const unsigned n,
+    const unsigned k, const float* A, const float* B, const float* C,
+    float* dst) {
+  const bool isValidate = A || B || C || dst;
   using namespace util;
-  const auto matA = CuPtr<float>(m * k);
-  const auto matB = CuPtr<float>(k * n);
-  const auto matC = CuPtr<float>(m * n);
+  const auto matA = isValidate ? CuPtr(m * k, A) : CuPtr<float>(m * k);
+  const auto matB = isValidate ? CuPtr(k * n, B) : CuPtr<float>(k * n);
+  const auto matC = isValidate ? CuPtr(m * n, C) : CuPtr<float>(m * n);
   auto matD = CuPtr<float>(m * n);
-  auto dst = std::make_unique<float[]>(m * n);
   cudaStream_t stream;
   check_cuda(cudaStreamCreate(&stream));
   // Kernel
-  #if defined(BENCH_GRD) && defined(BENCH_BLKN) && defined(BENCH_BLKM) && defined(BENCH_BLKK) && defined(BENCH_THN) && defined(BENCH_THM)
-  using Cfg = BlkCfg<BENCH_GRD, BENCH_BLKN, BENCH_BLKM, BENCH_BLKK, BENCH_THN, BENCH_THM>;
-  #else
-  using Cfg = BlkCfg<64, 16, 16, 32, 4, 4>;
-  #endif
-  // Heat-up
-  for (int i = 0; i < 10; ++i) {
+#if defined(BENCH_GRD) && defined(BENCH_BLKN) && defined(BENCH_BLKM) && \
+    defined(BENCH_BLKK) && defined(BENCH_THN) && defined(BENCH_THM)
+  using Cfg = BlkCfg<BENCH_GRD, BENCH_BLKN, BENCH_BLKM, BENCH_BLKK, BENCH_THN,
+      BENCH_THM>;
+#else
+  using Cfg = BlkCfg<4,32,8,32,4,8>;
+#endif
+  if (isValidate) {
     kernel_grid_v3_caller<Cfg{}>(
-        m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr(), stream);
+      m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
+    cudaMemcpy(dst, matD.ptr(), sizeof(float) * m * n, cudaMemcpyDeviceToHost);
+  } else {
+    auto dst = std::make_unique<float[]>(m * n);
+    // Heat-up
+    for (int i = 0; i < 10; ++i) {
+      kernel_grid_v3_caller<Cfg{}>(
+          m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr(), stream);
+    }
+    // Record time elapsed with cuda event API
+    int repeatCnt = 50;
+    cudaEvent_t start, stop;
+    check_cuda(cudaEventCreate(&start));
+    check_cuda(cudaEventCreate(&stop));
+    check_cuda(cudaEventRecord(start, stream));
+    for (int i = 0; i < repeatCnt; ++i) {
+      kernel_grid_v3_caller<Cfg{}>(
+          m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr(), stream);
+    }
+    check_cuda(cudaEventRecord(stop, stream));
+    check_cuda(cudaEventSynchronize(stop));
+    float time;
+    check_cuda(cudaEventElapsedTime(&time, start, stop));
+    std::cout << "AVG: " << time / repeatCnt << " ms" << std::endl;
+    check_cuda(cudaEventDestroy(start));
+    check_cuda(cudaEventDestroy(stop));
+    check_cuda(cudaStreamDestroy(stream));
+    cudaMemcpy(
+    dst.get(), matD.ptr(), sizeof(float) * m * n, cudaMemcpyDeviceToHost);
   }
-  // Record time elapsed with cuda event API
-  int repeatCnt = 50;
-  cudaEvent_t start, stop;
-  check_cuda(cudaEventCreate(&start));
-  check_cuda(cudaEventCreate(&stop));
-  check_cuda(cudaEventRecord(start, stream));
-  for (int i = 0; i < repeatCnt; ++i) {
-    kernel_grid_v3_caller<Cfg{}>(
-        m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr(), stream);
-  }
-  check_cuda(cudaEventRecord(stop, stream));
-  check_cuda(cudaEventSynchronize(stop));
-  float time;
-  check_cuda(cudaEventElapsedTime(&time, start, stop));
-  std::cout << "AVG: " << time / repeatCnt << " ms" << std::endl;
-  check_cuda(cudaEventDestroy(start));
-  check_cuda(cudaEventDestroy(stop));
-  check_cuda(cudaStreamDestroy(stream));
-  cudaMemcpy(
-      dst.get(), matD.ptr(), sizeof(float) * m * n, cudaMemcpyDeviceToHost);
 }

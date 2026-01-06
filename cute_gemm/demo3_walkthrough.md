@@ -157,7 +157,7 @@ We use **Thread-Tiling** (`ThN`, `ThM`) to reduce MIO pressure. By increasing th
 - As these dimensions grow, the thread starts to behave like a **systolic array**, where a slice of column in `A` and a slice of row in `B` are feed into the FPUs in each step.
 - However, there is a hard limit: **Register Pressure**. If `ThN * ThM` is too large, a single thread will exhaust its quota (255 registers), causing "register spilling" to slow local memory. Besides, micro-architecture is optimized for up-to 16 bytes per thread, thus the maximum `ThN * ThM` is 16.
 
-**All these are reasons for Tensor Cores.** Tensor Cores are hardware-accelerated matrix-multiply units. They perform a large outer product (e.g., $16 \times 8 \times 16$) in a single cycle, bypassing the register-pressure (and later MIO-bandwidth) constraints of general-purpose CUDA cores by performing the math inside a dedicated, high-density silicon block.
+**All these are reasons for Tensor Cores.** Tensor Cores are hardware-accelerated matrix-multiply units. They perform a large outer product (e.g., $16 \times 8 \times 16$) in a single step, bypassing the register-pressure (and later MIO-bandwidth) constraints of general-purpose CUDA cores by performing the math inside a dedicated, high-density silicon block.
 
 ### 6.5 GMEM Alignment and Vectorization
 A factor for improving Global Memory (GMEM) access is **vectorization**. To achieve peak bandwidth, the hardware should ideally issue 128-bit loads (`LDG.128`).

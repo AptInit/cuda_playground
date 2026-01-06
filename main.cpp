@@ -18,7 +18,7 @@ static bool run_gemm(int M, int N, int K) {
   for (int i = 0; i < M; ++i)
     for (int j = 0; j < N; ++j) C[i * N + j] = i + j;
 
-  gemm_f32_rrrr_cuda_v3(M, N, K, A.get(), B.get(), C.get(), dst.get());
+  gemm_f32_rrrr_cuda_v3_bench(M, N, K, A.get(), B.get(), C.get(), dst.get());
   if constexpr (test) {
     int errors = 0;
     for (int i = 0; i < M; ++i) {
@@ -63,6 +63,6 @@ int main() {
       all_pass = false;
     }
   }
-  if (all_pass) gemm_f32_rrrr_cuda_v3_bench(4096, 4096, 4096);
+  if (all_pass) gemm_f32_rrrr_cuda_v3_bench(4096, 4096, 4096, nullptr, nullptr, nullptr, nullptr);
   return all_pass ? 0 : 1;
 }

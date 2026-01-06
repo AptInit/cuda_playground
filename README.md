@@ -11,7 +11,7 @@ It contains a series of progressive demos:
   - Multi-level compute loops.
 
 Future work:
-- Auto-tuning
+- [Done] Auto-tuning
 - Vectorized GMEM access
 - Double-buffering
 - Async-copy
