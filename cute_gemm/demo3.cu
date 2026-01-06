@@ -316,10 +316,10 @@ void gemm_f32_rrrr_cuda_v3_bench(
   cudaStream_t stream;
   check_cuda(cudaStreamCreate(&stream));
   // Kernel
-  #ifndef BENCH_CFG
-  using Cfg = BlkCfg<64, 16, 16, 32, 4, 4>;
+  #if defined(BENCH_GRD) && defined(BENCH_BLKN) && defined(BENCH_BLKM) && defined(BENCH_BLKK) && defined(BENCH_THN) && defined(BENCH_THM)
+  using Cfg = BlkCfg<BENCH_GRD, BENCH_BLKN, BENCH_BLKM, BENCH_BLKK, BENCH_THN, BENCH_THM>;
   #else
-  using Cfg = BENCH_CFG;
+  using Cfg = BlkCfg<64, 16, 16, 32, 4, 4>;
   #endif
   // Heat-up
   for (int i = 0; i < 10; ++i) {

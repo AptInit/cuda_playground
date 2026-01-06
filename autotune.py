@@ -241,7 +241,7 @@ class BuildManager:
             cwd=self.build_dir if self.build_dir.exists() else self.source_dir
         )
 
-    def configure(self, bench_config: Optional[str] = None) -> BuildResult:
+    def configure(self, cfg: Optional['BlkCfg'] = None) -> BuildResult:
         """Configure the CMake project."""
         import time
         start = time.time()
@@ -256,8 +256,16 @@ class BuildManager:
             "-DCMAKE_BUILD_TYPE=Release",
         ]
 
-        if bench_config:
-            args.append(f"-DBENCH_CONFIG={bench_config}")
+        # Pass individual parameters to avoid shell escaping issues with template brackets
+        if cfg:
+            args.extend([
+                f"-DBENCH_GRD={cfg.grd}",
+                f"-DBENCH_BLKN={cfg.blkN}",
+                f"-DBENCH_BLKM={cfg.blkM}",
+                f"-DBENCH_BLKK={cfg.blkK}",
+                f"-DBENCH_THN={cfg.thN}",
+                f"-DBENCH_THM={cfg.thM}",
+            ])
 
         try:
             result = self._run_cmake(args)
@@ -341,10 +349,15 @@ class BuildManager:
         import time
         total_start = time.time()
 
-        # Always reconfigure to change BENCH_CONFIG
-        config_result = self.configure(cfg.to_cpp_type())
+        # Always reconfigure to change BENCH_* parameters
+        config_result = self.configure(cfg)
         if not config_result.success:
             return config_result
+
+        # Force rebuild of demo3.cu to ensure new config is picked up
+        demo3_path = self.source_dir / "cute_gemm" / "demo3.cu"
+        if demo3_path.exists():
+            demo3_path.touch()
 
         build_result = self.build()
         build_result.elapsed_seconds = time.time() - total_start

@@ -22,6 +22,15 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
             >
     )
 endif()
+# Auto-tuning support: pass individual parameters to build the BlkCfg type
+# Example: cmake -DBENCH_GRD=4 -DBENCH_BLKN=8 -DBENCH_BLKM=8 -DBENCH_BLKK=16 -DBENCH_THN=2 -DBENCH_THM=2
+if(DEFINED BENCH_GRD AND DEFINED BENCH_BLKN AND DEFINED BENCH_BLKM AND DEFINED BENCH_BLKK AND DEFINED BENCH_THN AND DEFINED BENCH_THM)
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/demo3.cu
+        PROPERTIES COMPILE_DEFINITIONS 
+            "BENCH_GRD=${BENCH_GRD};BENCH_BLKN=${BENCH_BLKN};BENCH_BLKM=${BENCH_BLKM};BENCH_BLKK=${BENCH_BLKK};BENCH_THN=${BENCH_THN};BENCH_THM=${BENCH_THM}"
+    )
+endif()
 #target_compile_options(cute_gemm PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address>)
 #target_link_options(cute_gemm PRIVATE $<$<LINK_LANGUAGE:CXX>:-fsanitize=address>)
 #target_link_libraries(cute_gemm PRIVATE CUDA::cudart)

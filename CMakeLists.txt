@@ -11,14 +11,6 @@ add_subdirectory(cute_gemm)
 add_executable(cuda_playground main.cpp)
 target_link_libraries(cuda_playground PRIVATE cute_gemm)
 
-# Auto-tuning support: pass -DBENCH_CONFIG="BlkCfg<...>" to inject kernel config
-# Only applies to demo3.cu to avoid symbol conflicts in other files
-if(BENCH_CONFIG)
-    set_source_files_properties(
-        ${CMAKE_SOURCE_DIR}/cute_gemm/demo3.cu
-        PROPERTIES COMPILE_DEFINITIONS "BENCH_CFG=${BENCH_CONFIG}"
-    )
-endif()
 #include(GNUInstallDirs)
 #install(TARGETS cuda_playground
 #        RUNTIME DESTINATION bin  # Will be <prefix>/bin
