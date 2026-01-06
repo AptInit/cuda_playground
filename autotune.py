@@ -555,6 +555,10 @@ class AutoTuner:
                 print(f"  ... and {len(configs_to_test) - 20} more")
             return
 
+        # Get current best if resuming
+        best_results = self.checkpoint.get_best_results(1)
+        best_time = best_results[0].time_ms if best_results else float('inf')
+
         # Run tests
         success_count = 0
         fail_count = 0
@@ -564,6 +568,11 @@ class AutoTuner:
 
             if result.status == "success":
                 success_count += 1
+                
+                if result.time_ms < best_time:
+                    best_time = result.time_ms
+                    print(f"\n[NEW BEST] {result.time_ms:.3f} ms - {cfg.to_cpp_type()}")
+                
                 if self.verbose:
                     print(f"\n  {cfg.to_cpp_type()} -> {result.time_ms:.3f} ms")
             else:
