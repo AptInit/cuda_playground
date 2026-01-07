@@ -11,6 +11,10 @@ template <unsigned grd_, unsigned blkN_, unsigned blkM_, unsigned blkK_,
 struct BlkCfg {
   // Skip predication on N and M?
   bool nMPredSkip{};
+  // Is aTen "aligned enough" to consider GMEM vector load?
+  unsigned aTenLoadFactor = 1;
+  // Skip predication on K?
+  bool kPredSkip{};
   // blockDim.x
   using BlkN = cute::Int<blkN_>;
   BlkN blkN{};
@@ -29,23 +33,39 @@ struct BlkCfg {
   Grd grd{};
 };
 
-template <BlkCfg cfg, bool kPredSkip, typename TACCR, typename TAS,
-    typename TBS, typename TA, typename TB, typename TPred, typename TWldShape>
-__device__ __forceinline__ static void tiny_loop(TACCR& accTile, TAS aSTen,
-    TBS bSTen, const TA a_ttiled, const TB b_ttiled, const TPred id_ttiled,
+template <BlkCfg cfg, typename TACCR, typename TAS, typename TBS, typename TA,
+    typename TB, typename TPred, typename TWldShape>
+__device__ static void tiny_loop(TACCR& accTile, TAS aSTen, TBS bSTen,
+    const TA a_ttiled, const TB b_ttiled, const TPred id_ttiled,
     const TWldShape worldShape) {
   using namespace cute;
   // load scratch
   static_assert(cfg.blkK % cfg.blkN == 0);
   __syncthreads();
-  if constexpr (cfg.nMPredSkip && kPredSkip) {
-    for (unsigned tm = 0; tm < cfg.thM; ++tm) {
-      for (unsigned laOffset = threadIdx.x; laOffset < cfg.blkK;
-          laOffset += cfg.blkN) {
-        aSTen(laOffset, threadIdx.y + tm * cfg.blkM) =
-            a_ttiled(laOffset, threadIdx.y + tm * cfg.blkM);
-      }
-    }
+  if constexpr (cfg.nMPredSkip && cfg.kPredSkip) {
+    static_assert((cfg.blkN * cfg.aTenLoadFactor) % cfg.blkK == 0 ||
+                  cfg.blkK % (cfg.blkN * cfg.aTenLoadFactor));
+    static_assert((cfg.blkK * cfg.blkM * cfg.thM) %
+                      (cfg.blkN * cfg.aTenLoadFactor * cfg.blkM) ==
+                  0);
+    static_assert(cfg.blkK % cfg.aTenLoadFactor == 0);
+    constexpr unsigned max_threads_m = cfg.blkK / cfg.aTenLoadFactor;
+    constexpr unsigned th_m_val = (cfg.blkN < max_threads_m)
+                                      ? static_cast<unsigned>(cfg.blkN)
+                                      : max_threads_m;
+    constexpr unsigned th_n_val = cfg.blkM * (cfg.blkN / th_m_val);
+    constexpr auto thr_layout =
+        make_layout(make_shape(Int<th_m_val>{}, Int<th_n_val>{}));
+    using Vec = cutlass::AlignedArray<float, cfg.aTenLoadFactor>;
+    using Atom = Copy_Atom<UniversalCopy<Vec>, Vec>;
+    auto tiled_copy = make_tiled_copy(Atom{}, thr_layout);
+    auto thr_copy =
+        tiled_copy.get_thread_slice(threadIdx.x + threadIdx.y * cfg.blkN);
+    auto tAgA = thr_copy.partition_S(
+        recast<Vec>(a_ttiled));  // this thread's source vectors
+    auto tAsA = thr_copy.partition_D(
+        recast<Vec>(aSTen));  // this thread's destination vectors
+    copy(tiled_copy, tAgA, tAsA);
 
     for (unsigned lbOffset = threadIdx.y; lbOffset < cfg.blkK;
         lbOffset += cfg.blkM) {
@@ -65,7 +85,7 @@ __device__ __forceinline__ static void tiny_loop(TACCR& accTile, TAS aSTen,
             (cfg.nMPredSkip ||
                 elem_less(id_ttiled(_0{}, _0{}, threadIdx.y + tm * cfg.blkM),
                     worldShape)) &&
-            (kPredSkip ||
+            (cfg.kPredSkip ||
                 elem_less(id_ttiled(_0{}, laOffset, _0{}), worldShape));
         aSTen(laOffset, threadIdx.y + tm * cfg.blkM) =
             loadA ? a_ttiled(laOffset, threadIdx.y + tm * cfg.blkM) : 0.0f;
@@ -78,7 +98,7 @@ __device__ __forceinline__ static void tiny_loop(TACCR& accTile, TAS aSTen,
             (cfg.nMPredSkip ||
                 elem_less(id_ttiled(threadIdx.x * cfg.thN + tn, _0{}, _0{}),
                     worldShape)) &&
-            (kPredSkip ||
+            (cfg.kPredSkip ||
                 elem_less(id_ttiled(_0{}, lbOffset, _0{}), worldShape));
         bSTen(threadIdx.x * cfg.thN + tn, lbOffset) =
             loadB ? b_ttiled(threadIdx.x * cfg.thN + tn, lbOffset) : 0.0f;
@@ -106,24 +126,13 @@ __device__ __forceinline__ static void tiny_loop(TACCR& accTile, TAS aSTen,
   }
 }
 
-template <BlkCfg cfg, typename TA, typename TB, typename TC, typename TDst,
-    typename TPred, typename TWldShape>
-__device__ __forceinline__ static void kernel_block(const TA a_tiled,
+template <BlkCfg cfg, typename TAS, typename TBS, typename TA, typename TB,
+    typename TC, typename TDst, typename TPred, typename TWldShape>
+__device__ static void kernel_block(TAS aSTen, TBS bSTen, const TA a_tiled,
     const TB b_tiled, const TC c_tiled, const TDst dst_tiled,
     const TPred id_tiled, const TWldShape worldShape) {
   using namespace cute;
-  // Swizzled layout for aSTen to reduce SMEM bank conflicts
-  constexpr auto aSMEMSwizzle =
-      cute::Swizzle<2, log_2(static_cast<unsigned>(cfg.thM)), 4>{};
-  constexpr auto aSMEMLayoutBase =
-      make_layout(make_shape(cfg.blkK, cfg.blkM * cfg.thM));
-  constexpr auto aSMEMLayout = cute::composition(aSMEMSwizzle, aSMEMLayoutBase);
-  __shared__ float aS[decltype(cosize(aSMEMLayoutBase))::value];
-  auto aSTen = make_tensor(make_smem_ptr(aS), aSMEMLayout);
-  constexpr auto bSMEMLayout =
-      make_layout(make_shape(cfg.blkN * cfg.thN, cfg.blkK));
-  __shared__ float bS[decltype(cosize(bSMEMLayout))::value];
-  auto bSTen = make_tensor(make_smem_ptr(bS), bSMEMLayout);
+
   auto accTile = make_tensor<float>(make_shape(cfg.blkN, cfg.blkM));
   if constexpr (cfg.nMPredSkip) {
     for (unsigned tm = 0; tm < cfg.thM; ++tm) {
@@ -152,18 +161,22 @@ __device__ __forceinline__ static void kernel_block(const TA a_tiled,
   const bool partialK = get<1>(worldShape) % cfg.blkK;
   const unsigned kCnt = get<1>(worldShape) / cfg.blkK;
   for (unsigned tileIdx = 0; tileIdx < kCnt; ++tileIdx) {
-    tiny_loop<cfg, true>(accTile, aSTen, bSTen,
-        local_tile(a_tiled, aSMEMLayout.shape(), tileIdx),
-        local_tile(b_tiled, bSMEMLayout.shape(), tileIdx),
+    constexpr auto tinyCfg =
+        decltype(cfg){cfg.nMPredSkip, cfg.aTenLoadFactor, true};
+    tiny_loop<tinyCfg>(accTile, aSTen, bSTen,
+        local_tile(a_tiled, aSTen.layout().shape(), tileIdx),
+        local_tile(b_tiled, bSTen.layout().shape(), tileIdx),
         local_tile(id_tiled,
             make_tile(cfg.blkN * cfg.thN, cfg.blkK, cfg.blkM * cfg.thM),
             tileIdx),
         worldShape);
   }
   if (partialK) {
-    tiny_loop<cfg, false>(accTile, aSTen, bSTen,
-        local_tile(a_tiled, aSMEMLayout.shape(), kCnt),
-        local_tile(b_tiled, bSMEMLayout.shape(), kCnt),
+    constexpr auto tinyCfg =
+        decltype(cfg){cfg.nMPredSkip, cfg.aTenLoadFactor, false};
+    tiny_loop<tinyCfg>(accTile, aSTen, bSTen,
+        local_tile(a_tiled, aSTen.layout().shape(), kCnt),
+        local_tile(b_tiled, bSTen.layout().shape(), kCnt),
         local_tile(id_tiled,
             make_tile(cfg.blkN * cfg.thN, cfg.blkK, cfg.blkM * cfg.thM), kCnt),
         worldShape);
@@ -197,7 +210,7 @@ template <unsigned grd_, unsigned blkN_, unsigned blkM_, unsigned blkK_,
 __global__ static void __launch_bounds__(blkN_* blkM_)
     kernel_grid_v3(const unsigned m, const unsigned n, const unsigned k,
         const float* A, const float* B, const float* C, float* dst) {
-  // Integer intensity is ridiculous
+  // Integer intensity is ridiculous, also reg count is exploding
   using namespace cute;
   namespace cg = cooperative_groups;
 
@@ -247,14 +260,36 @@ __global__ static void __launch_bounds__(blkN_* blkM_)
     const auto dstTiled =
         local_tile(dstTen, blockTiler, tileCoord, Step<_1, X, _1>{});
     const auto probITiled = local_tile(worldI, blockTiler, tileCoord);
-    if (elem_less(probITiled(typename Cfg::BlkN{} * typename Cfg::ThN{} - _1{},
-                      _0{}, typename Cfg::BlkM{} * typename Cfg::ThM{} - _1{}),
+
+    // Swizzled layout for aSTen to reduce SMEM bank conflicts
+    constexpr auto aSMEMSwizzle = cute::Swizzle<2,
+        log_2(static_cast<unsigned>(typename Cfg::ThM{})), 4>{};
+    constexpr auto aSMEMLayoutBase =
+        make_layout(make_shape(typename Cfg::BlkK{}, get<2>(blockTiler)));
+    __shared__ float aS[decltype(cosize(aSMEMLayoutBase))::value];
+    auto aSTen = make_tensor(
+        make_smem_ptr(aS), cute::composition(aSMEMSwizzle, aSMEMLayoutBase));
+    constexpr auto bSMEMLayout =
+        make_layout(make_shape(get<0>(blockTiler), typename Cfg::BlkK{}));
+    __shared__ float bS[decltype(cosize(bSMEMLayout))::value];
+    auto bSTen = make_tensor(make_smem_ptr(bS), bSMEMLayout);
+
+    if (elem_less(probITiled(get<0>(blockTiler) - _1{}, _0{},
+                      get<2>(blockTiler) - _1{}),
             world)) {
-      kernel_block<Cfg{true}>(
-          aTiled, bTiled, cTiled, dstTiled, probITiled, shape(world));
+      // Reg count shoots to 188 for this, don't do it for now
+      // if ((aTen.layout()(_0{}, _1{})-aTen.layout()(_0{}, _0{}))%2==0) {
+      //   kernel_block<Cfg{true, 2}>(aSTen, bSTen,
+      //     aTiled, bTiled, cTiled, dstTiled, probITiled, shape(world));
+      // } else {
+      //
+      // }
+      kernel_block<Cfg{true, 1}>(aSTen, bSTen, aTiled, bTiled, cTiled, dstTiled,
+          probITiled, shape(world));
+
     } else {
-      kernel_block<Cfg{false}>(
-          aTiled, bTiled, cTiled, dstTiled, probITiled, shape(world));
+      kernel_block<Cfg{false, 1}>(aSTen, bSTen, aTiled, bTiled, cTiled,
+          dstTiled, probITiled, shape(world));
     }
   }
 }
@@ -300,7 +335,7 @@ void gemm_f32_rrrr_cuda_v3(const unsigned m, const unsigned n, const unsigned k,
   auto matD = CuPtr<float>(m * n);
   // Kernel
   // Found by autotune.py
-  using Cfg = BlkCfg<4,32,8,32,4,8>;
+  using Cfg = BlkCfg<4, 32, 8, 32, 4, 8>;
   kernel_grid_v3_caller<Cfg{}>(
       m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
   cudaMemcpy(dst, matD.ptr(), sizeof(float) * m * n, cudaMemcpyDeviceToHost);
@@ -323,11 +358,11 @@ void gemm_f32_rrrr_cuda_v3_bench(const unsigned m, const unsigned n,
   using Cfg = BlkCfg<BENCH_GRD, BENCH_BLKN, BENCH_BLKM, BENCH_BLKK, BENCH_THN,
       BENCH_THM>;
 #else
-  using Cfg = BlkCfg<4,32,8,32,4,8>;
+  using Cfg = BlkCfg<4, 32, 8, 32, 4, 8>;
 #endif
   if (isValidate) {
     kernel_grid_v3_caller<Cfg{}>(
-      m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
+        m, n, k, matA.ptr(), matB.ptr(), matC.ptr(), matD.ptr());
     cudaMemcpy(dst, matD.ptr(), sizeof(float) * m * n, cudaMemcpyDeviceToHost);
   } else {
     auto dst = std::make_unique<float[]>(m * n);
@@ -355,6 +390,6 @@ void gemm_f32_rrrr_cuda_v3_bench(const unsigned m, const unsigned n,
     check_cuda(cudaEventDestroy(stop));
     check_cuda(cudaStreamDestroy(stream));
     cudaMemcpy(
-    dst.get(), matD.ptr(), sizeof(float) * m * n, cudaMemcpyDeviceToHost);
+        dst.get(), matD.ptr(), sizeof(float) * m * n, cudaMemcpyDeviceToHost);
   }
 }
